@@ -436,13 +436,20 @@ static int s3c_rtc_remove(struct platform_device *pdev)
 }
 
 static const struct of_device_id s3c_rtc_dt_match[];
+#ifdef CONFIG_PLAT_S3C24XX
+static struct s3c_rtc_data const s3c2410_rtc_data;
+#endif
 
 static struct s3c_rtc_data *s3c_rtc_get_data(struct platform_device *pdev)
 {
+#ifdef CONFIG_PLAT_S3C24XX
+	return &s3c2410_rtc_data;
+#else
 	const struct of_device_id *match;
 
 	match = of_match_node(s3c_rtc_dt_match, pdev->dev.of_node);
 	return (struct s3c_rtc_data *)match->data;
+#endif
 }
 
 static int s3c_rtc_probe(struct platform_device *pdev)
@@ -824,7 +831,11 @@ static struct platform_driver s3c_rtc_driver = {
 	.probe		= s3c_rtc_probe,
 	.remove		= s3c_rtc_remove,
 	.driver		= {
+#ifdef CONFIG_PLAT_S3C24XX
+		.name	= "s3c2410-rtc",
+#else
 		.name	= "s3c-rtc",
+#endif
 		.pm	= &s3c_rtc_pm_ops,
 		.of_match_table	= of_match_ptr(s3c_rtc_dt_match),
 	},
