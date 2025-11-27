@@ -137,6 +137,7 @@ struct samsung_gate_clock s3c2410_common_gates[] __initdata = {
 /* should be added _after_ the soc-specific clocks are created */
 struct samsung_clock_alias s3c2410_common_aliases[] __initdata = {
 	ALIAS(PCLK_I2C, "s3c2410-i2c.0", "i2c"),
+	ALIAS(PCLK_SPI, "s3c2410-spi.0", "spi"),
 	ALIAS(PCLK_ADC, NULL, "adc"),
 	ALIAS(PCLK_RTC, NULL, "rtc"),
 	ALIAS(PCLK_PWM, NULL, "timers"),
