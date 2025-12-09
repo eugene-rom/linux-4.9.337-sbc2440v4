@@ -568,6 +568,12 @@ static int s3c24xx_spi_probe(struct platform_device *pdev)
 		goto err_no_pdata;
 	}
 
+	err = clk_prepare_enable(hw->clk);
+	if (err) {
+		dev_err(&pdev->dev, "Couldn't enable clock 'spi'\n");
+		goto err_no_pdata;
+	}
+
 	/* setup any gpio we can */
 
 	if (!pdata->set_cs) {
