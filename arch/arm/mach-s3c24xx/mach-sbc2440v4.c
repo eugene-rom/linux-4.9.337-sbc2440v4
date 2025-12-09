@@ -29,6 +29,7 @@
 #include <linux/i2c.h>
 #include <linux/mmc/host.h>
 #include <linux/spi/s3c24xx.h>
+#include <linux/spi/spi.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
@@ -581,44 +582,11 @@ static void __init sbc2440v4_dm9000_bus_timing_init(void)
             bwsc_old, bwsc_new, bank4_val);
 }
 
-// sbc2440v4_spi0_gpio_setup - don't know if this is really necessary, needs testing with real device
-static void sbc2440v4_spi0_gpio_setup(struct s3c2410_spi_info *spi, int enable)
-{
-	if ( enable )
-	{
-		s3c_gpio_cfgpin(S3C2410_GPE(13), S3C2410_GPE13_SPICLK0);
-		s3c_gpio_cfgpin(S3C2410_GPE(11), S3C2410_GPE11_SPIMISO0);
-		s3c_gpio_cfgpin(S3C2410_GPE(12), S3C2410_GPE12_SPIMOSI0);
-		s3c_gpio_cfgpin(S3C2410_GPG(2), S3C2410_GPIO_OUTPUT);
-
-		s3c_gpio_setpull(S3C2410_GPE(13), 0);
-		s3c_gpio_setpull(S3C2410_GPE(11), 0);
-		s3c_gpio_setpull(S3C2410_GPE(12), 0);
-		pr_info("SPI gpio setup done\n");
-	}
-	else
-	{
-		s3c_gpio_cfgpin(S3C2410_GPE(13), S3C2410_GPIO_INPUT);
-		s3c_gpio_cfgpin(S3C2410_GPE(11), S3C2410_GPIO_INPUT);
-		s3c_gpio_setpull(S3C2410_GPE(11), S3C_GPIO_PULL_NONE);
-		s3c_gpio_setpull(S3C2410_GPE(12), S3C_GPIO_PULL_NONE);
-		s3c_gpio_setpull(S3C2410_GPE(13), S3C_GPIO_PULL_NONE);
-	}
-}
-
-static void sbc2440v4_spi0_cs(struct s3c2410_spi_info *spi, int cs, int pol)
-{
-	s3c_gpio_setpull(S3C2410_GPG(2), pol);
-	pr_info("SPI cs setup done\n");
-}
-
-static struct s3c2410_spi_info sbc2440v4_spi0_platdata = {
+static struct s3c2410_spi_info sbc2440v4_spi0_cfg = {
+	.pin_cs = S3C2410_GPG(2),
 	.num_cs = 1,
 	.bus_num = 0,
-	.gpio_setup = sbc2440v4_spi0_gpio_setup,
-	.set_cs = sbc2440v4_spi0_cs,
 };
-
 
 static void __init sbc2440v4_init(void)
 {
@@ -663,7 +631,7 @@ static void __init sbc2440v4_init(void)
 
 
 	/* setup spi */
-	s3c_device_spi0.dev.platform_data = &sbc2440v4_spi0_platdata;
+	s3c_device_spi0.dev.platform_data = &sbc2440v4_spi0_cfg;
 
 	s3c24xx_udc_set_platdata(&sbc2440v4_udc_cfg);
 	s3c24xx_mci_set_platdata(&sbc2440v4_mmc_cfg);
