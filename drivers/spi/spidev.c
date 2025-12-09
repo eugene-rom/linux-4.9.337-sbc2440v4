@@ -826,14 +826,24 @@ static int spidev_remove(struct spi_device *spi)
 	return 0;
 }
 
+static const struct spi_device_id spidev_ids[] = {
+    { .name = "spidev" },
+    {}
+};
+
+MODULE_DEVICE_TABLE(spi, spidev_ids);
+
 static struct spi_driver spidev_spi_driver = {
 	.driver = {
 		.name =		"spidev",
+		.owner = THIS_MODULE,
 		.of_match_table = of_match_ptr(spidev_dt_ids),
 		.acpi_match_table = ACPI_PTR(spidev_acpi_ids),
 	},
 	.probe =	spidev_probe,
 	.remove =	spidev_remove,
+
+	.id_table = spidev_ids,
 
 	/* NOTE:  suspend/resume methods are not necessary here.
 	 * We don't do anything except pass the requests to/from
