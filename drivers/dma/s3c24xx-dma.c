@@ -1290,6 +1290,7 @@ static int s3c24xx_dma_probe(struct platform_device *pdev)
 	s3cdma->memcpy.device_config = s3c24xx_dma_set_runtime_config;
 	s3cdma->memcpy.device_terminate_all = s3c24xx_dma_terminate_all;
 	s3cdma->memcpy.device_synchronize = s3c24xx_dma_synchronize;
+	s3cdma->memcpy.directions = BIT(DMA_DEV_TO_MEM) | BIT(DMA_MEM_TO_DEV);
 
 	/* Initialize slave engine for SoC internal dedicated peripherals */
 	dma_cap_set(DMA_SLAVE, s3cdma->slave.cap_mask);
@@ -1308,6 +1309,7 @@ static int s3c24xx_dma_probe(struct platform_device *pdev)
 	s3cdma->slave.filter.map = pdata->slave_map;
 	s3cdma->slave.filter.mapcnt = pdata->slavecnt;
 	s3cdma->slave.filter.fn = s3c24xx_dma_filter;
+	s3cdma->slave.directions = BIT(DMA_DEV_TO_MEM) | BIT(DMA_MEM_TO_DEV);
 
 
 	/* Register as many memcpy channels as there are physical channels */
