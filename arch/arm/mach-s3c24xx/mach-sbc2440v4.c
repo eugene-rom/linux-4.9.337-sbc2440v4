@@ -586,6 +586,7 @@ static struct s3c2410_spi_info sbc2440v4_spi0_cfg = {
 	.pin_cs = S3C2410_GPG(2),
 	.num_cs = 1,
 	.bus_num = 0,
+	.use_fiq = 1,
 };
 
 static void __init sbc2440v4_init(void)
