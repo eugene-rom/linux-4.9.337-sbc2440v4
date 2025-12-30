@@ -11,47 +11,28 @@
  * published by the Free Software Foundation.
 */
 
-#include <linux/kernel.h>
-#include <linux/types.h>
-#include <linux/interrupt.h>
-#include <linux/list.h>
-#include <linux/timer.h>
-#include <linux/init.h>
 #include <linux/gpio.h>
-#include <linux/input.h>
-#include <linux/io.h>
-#include <linux/serial_core.h>
 #include <linux/serial_s3c.h>
 #include <linux/dm9000.h>
 #include <linux/platform_data/at24.h>
-#include <linux/platform_device.h>
-#include <linux/gpio_keys.h>
 #include <linux/i2c.h>
 #include <linux/mmc/host.h>
 #include <linux/spi/s3c24xx.h>
-#include <linux/spi/spi.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
 
-#include <mach/hardware.h>
 #include <mach/fb.h>
 #include <asm/mach-types.h>
 
 #include <mach/regs-gpio.h>
 #include <linux/platform_data/leds-s3c24xx.h>
 #include <mach/regs-lcd.h>
-#include <mach/irqs.h>
 #include <mach/gpio-samsung.h>
 #include <linux/platform_data/mtd-nand-s3c2410.h>
 #include <linux/platform_data/i2c-s3c2410.h>
 #include <linux/platform_data/mmc-s3cmci.h>
 #include <linux/platform_data/usb-s3c2410_udc.h>
-#include <linux/platform_data/usb-ohci-s3c2410.h>
-
-#include <linux/mtd/mtd.h>
-#include <linux/mtd/nand.h>
-#include <linux/mtd/nand_ecc.h>
 #include <linux/mtd/partitions.h>
 
 #include <plat/gpio-cfg.h>
