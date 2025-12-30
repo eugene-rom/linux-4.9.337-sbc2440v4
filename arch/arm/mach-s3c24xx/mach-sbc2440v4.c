@@ -47,6 +47,7 @@
 #include <linux/platform_data/i2c-s3c2410.h>
 #include <linux/platform_data/mmc-s3cmci.h>
 #include <linux/platform_data/usb-s3c2410_udc.h>
+#include <linux/platform_data/usb-ohci-s3c2410.h>
 
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/nand.h>
@@ -99,9 +100,8 @@ static struct s3c2410_uartcfg sbc2440v4_uartcfgs[] __initdata = {
 };
 
 /* USB device UDC support */
-
 static struct s3c2410_udc_mach_info sbc2440v4_udc_cfg __initdata = {
-	.pullup_pin = S3C2410_GPC(5),
+	.pullup_pin = S3C2410_GPG(12),
 };
 
 
