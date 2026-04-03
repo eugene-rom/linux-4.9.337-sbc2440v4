@@ -250,7 +250,12 @@ static struct mtd_partition sbc2440v4_default_nand_part[] __initdata = {
 	[2] = {
 		.name	= "root",
 		.offset = 0x00250000,
-		.size	= 0x03dac000,
+		.size	= 0x03bac000,
+	},
+	[3] = {
+		.name	= "varlib",
+		.offset = 0x03dfc000,
+		.size	= 0x00200000,
 	}
 };
 
