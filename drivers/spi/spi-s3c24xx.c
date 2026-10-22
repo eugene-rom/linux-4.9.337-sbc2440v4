@@ -182,9 +182,8 @@ static int s3c24xx_spi_setup(struct spi_device *spi)
 
 	/* allocate settings on the first call */
 	if (!cs) {
-		cs = devm_kzalloc(&spi->dev,
-				  sizeof(struct s3c24xx_spi_devstate),
-				  GFP_KERNEL);
+		cs = kzalloc(sizeof(struct s3c24xx_spi_devstate),
+			     GFP_KERNEL);
 		if (!cs)
 			return -ENOMEM;
 
@@ -206,6 +205,12 @@ static int s3c24xx_spi_setup(struct spi_device *spi)
 	mutex_unlock(&hw->bitbang.lock);
 
 	return 0;
+}
+
+static void s3c24xx_spi_cleanup(struct spi_device *spi)
+{
+	kfree(spi->controller_state);
+	spi->controller_state = NULL;
 }
 
 static inline unsigned int hw_txbyte(struct s3c24xx_spi *hw, int count)
@@ -536,6 +541,7 @@ static int s3c24xx_spi_probe(struct platform_device *pdev)
 	hw->bitbang.txrx_bufs      = s3c24xx_spi_txrx;
 
 	hw->master->setup  = s3c24xx_spi_setup;
+	hw->master->cleanup = s3c24xx_spi_cleanup;
 
 	dev_dbg(hw->dev, "bitbang at %p\n", &hw->bitbang);
 
