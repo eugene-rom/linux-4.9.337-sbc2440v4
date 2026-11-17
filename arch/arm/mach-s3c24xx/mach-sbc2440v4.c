@@ -255,7 +255,7 @@ static struct mtd_partition sbc2440v4_default_nand_part[] __initdata = {
 	[3] = {
 		.name	= "varlib",
 		.offset = 0x03dfc000,
-		.size	= 0x00200000,
+		.size	= 0x001f4000, // leave room for flash_bbt
 	}
 };
 
