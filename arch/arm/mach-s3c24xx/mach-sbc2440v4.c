@@ -16,6 +16,10 @@
 #include <linux/dm9000.h>
 #include <linux/mmc/host.h>
 #include <linux/spi/s3c24xx.h>
+#if defined(WITH_ADS7846)
+#include <linux/spi/spi.h>
+#include <linux/spi/ads7846.h>
+#endif
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
@@ -551,6 +555,50 @@ static void __init sbc2440v4_dm9000_bus_timing_init(void)
             bwsc_old, bwsc_new, bank4_val);
 }
 
+#if defined(WITH_ADS7846)
+/*
+ * XPT2046 / ADS7846 SPI touchscreen on SPI0 CS1.
+ * Set TS_CS_GPIO to any free output GPIO and TS_IRQ_GPIO to a free EINT pin
+ * (e.g. GPF1, GPF4, GPG5, GPG6, GPG7 on CON2).
+ */
+#define SBC2440V4_TS_CS_GPIO	S3C2410_GPJ(0)
+#define SBC2440V4_TS_IRQ_GPIO	S3C2410_GPF(1)
+
+static const int sbc2440v4_spi0_cs_pins[] = {
+	S3C2410_GPG(2),		/* CS0: ST7789V */
+	SBC2440V4_TS_CS_GPIO,	/* CS1: XPT2046 / ADS7846 */
+};
+
+static void sbc2440v4_spi0_set_cs(struct s3c2410_spi_info *spi, int cs, int pol)
+{
+	if (cs >= 0 && cs < ARRAY_SIZE(sbc2440v4_spi0_cs_pins))
+		gpio_set_value(sbc2440v4_spi0_cs_pins[cs], pol);
+}
+
+static struct ads7846_platform_data sbc2440v4_ts_pdata = {
+	.model			= 7846,
+	.vref_delay_usecs	= 100,
+	.x_plate_ohms		= 400,
+	.y_plate_ohms		= 400,
+	.pressure_max		= 1024,
+	.debounce_max		= 10,
+	.debounce_tol		= 3,
+	.debounce_rep		= 1,
+	.gpio_pendown		= SBC2440V4_TS_IRQ_GPIO,
+};
+
+static struct spi_board_info sbc2440v4_spi_board_info[] __initdata = {
+	{
+		.modalias	= "ads7846",
+		.max_speed_hz	= 2000000,
+		.bus_num	= 0,
+		.chip_select	= 1,
+		.mode		= SPI_MODE_0,
+		.platform_data	= &sbc2440v4_ts_pdata,
+	},
+};
+#endif
+
 static void sbc2440v4_spi0_gpio_setup(struct s3c2410_spi_info *spi, int enable)
 {
 	if (enable)
@@ -559,11 +607,17 @@ static void sbc2440v4_spi0_gpio_setup(struct s3c2410_spi_info *spi, int enable)
 }
 
 static struct s3c2410_spi_info sbc2440v4_spi0_cfg = {
-	.pin_cs = S3C2410_GPG(2),
-	.num_cs = 1,
-	.bus_num = 0,
-	.use_fiq = 1,
-	.gpio_setup = sbc2440v4_spi0_gpio_setup,
+#if defined(WITH_ADS7846)
+	.pin_cs		= -1,
+	.num_cs		= ARRAY_SIZE(sbc2440v4_spi0_cs_pins),
+	.set_cs		= sbc2440v4_spi0_set_cs,
+#else
+	.pin_cs		= S3C2410_GPG(2),
+	.num_cs		= 1,
+#endif
+	.bus_num	= 0,
+	.use_fiq	= 1,
+	.gpio_setup	= sbc2440v4_spi0_gpio_setup,
 };
 
 static void __init sbc2440v4_init(void)
@@ -610,6 +664,25 @@ static void __init sbc2440v4_init(void)
 
 	/* setup spi */
 	s3c_device_spi0.dev.platform_data = &sbc2440v4_spi0_cfg;
+#if defined(WITH_ADS7846)
+	{
+		int i, irq;
+
+		for (i = 0; i < ARRAY_SIZE(sbc2440v4_spi0_cs_pins); i++)
+			WARN_ON(gpio_request_one(sbc2440v4_spi0_cs_pins[i],
+						 GPIOF_OUT_INIT_HIGH, "spi0-cs"));
+
+		irq = gpio_to_irq(SBC2440V4_TS_IRQ_GPIO);
+		if (WARN_ON(irq < 0)) {
+			pr_err("SBC2440V4: invalid TS IRQ GPIO %d\n",
+			       SBC2440V4_TS_IRQ_GPIO);
+		} else {
+			sbc2440v4_spi_board_info[0].irq = irq;
+			spi_register_board_info(sbc2440v4_spi_board_info,
+						ARRAY_SIZE(sbc2440v4_spi_board_info));
+		}
+	}
+#endif
 
 	s3c24xx_udc_set_platdata(&sbc2440v4_udc_cfg);
 	s3c24xx_mci_set_platdata(&sbc2440v4_mmc_cfg);
