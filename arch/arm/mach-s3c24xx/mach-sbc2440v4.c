@@ -14,8 +14,6 @@
 #include <linux/gpio.h>
 #include <linux/serial_s3c.h>
 #include <linux/dm9000.h>
-#include <linux/platform_data/at24.h>
-#include <linux/i2c.h>
 #include <linux/mmc/host.h>
 #include <linux/spi/s3c24xx.h>
 
@@ -384,21 +382,6 @@ static struct platform_device sbc2440v4_audio = {
 	},
 };
 
-/*
- * I2C devices
- */
-static struct at24_platform_data at24c08 = {
-	.byte_len	= SZ_8K / 8,
-	.page_size	= 16,
-};
-
-static struct i2c_board_info sbc2440v4_i2c_devs[] __initdata = {
-	{
-		I2C_BOARD_INFO("24c08", 0x50),
-		.platform_data = &at24c08,
-	},
-};
-
 static struct uda134x_platform_data s3c24xx_uda134x = {
 	.l3 = {
 		.gpio_clk = S3C2410_GPB(4),
@@ -568,11 +551,19 @@ static void __init sbc2440v4_dm9000_bus_timing_init(void)
             bwsc_old, bwsc_new, bank4_val);
 }
 
+static void sbc2440v4_spi0_gpio_setup(struct s3c2410_spi_info *spi, int enable)
+{
+	if (enable)
+		s3c_gpio_cfgall_range(S3C2410_GPE(11), 3,
+				      S3C_GPIO_SFN(2), S3C_GPIO_PULL_NONE);
+}
+
 static struct s3c2410_spi_info sbc2440v4_spi0_cfg = {
 	.pin_cs = S3C2410_GPG(2),
 	.num_cs = 1,
 	.bus_num = 0,
 	.use_fiq = 1,
+	.gpio_setup = sbc2440v4_spi0_gpio_setup,
 };
 
 static void __init sbc2440v4_init(void)
@@ -624,9 +615,6 @@ static void __init sbc2440v4_init(void)
 	s3c24xx_mci_set_platdata(&sbc2440v4_mmc_cfg);
 	s3c_nand_set_platdata(&sbc2440v4_nand_info);
 	s3c_i2c0_set_platdata(NULL);
-
-	i2c_register_board_info(0, sbc2440v4_i2c_devs,
-				ARRAY_SIZE(sbc2440v4_i2c_devs));
 
 	platform_add_devices(sbc2440v4_devices, ARRAY_SIZE(sbc2440v4_devices));
 
