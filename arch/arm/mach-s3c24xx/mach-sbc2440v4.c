@@ -12,6 +12,7 @@
 */
 
 #include <linux/gpio.h>
+#include <linux/io.h>
 #include <linux/serial_s3c.h>
 #include <linux/dm9000.h>
 #include <linux/mmc/host.h>
@@ -35,6 +36,7 @@
 #include <linux/platform_data/i2c-s3c2410.h>
 #include <linux/platform_data/mmc-s3cmci.h>
 #include <linux/platform_data/usb-s3c2410_udc.h>
+#include <linux/platform_data/touchscreen-s3c2410.h>
 #include <linux/mtd/partitions.h>
 
 #include <plat/gpio-cfg.h>
@@ -410,11 +412,19 @@ static struct platform_device uda1340_codec = {
 		},
 };
 
+static struct s3c2410_ts_mach_info sbc2440v4_ts_cfg __initdata = {
+	.delay			= 10000,
+	.presc			= 49,
+	.oversampling_shift	= 2,
+	/* S3C2440 uses internal TS FETs; do NOT set cfg_gpio (GPG12 is USB_EN) */
+};
+
 static struct platform_device *sbc2440v4_devices[] __initdata = {
 	&s3c_device_ohci,
 	&s3c_device_wdt,
 	&s3c_device_i2c0,
 	&s3c_device_rtc,
+	&s3c_device_adc,
 	&s3c_device_spi0,
 	&s3c_device_usbgadget,
 	&sbc2440v4_device_eth,
@@ -447,8 +457,7 @@ static void __init sbc2440v4_init_time(void)
  * sbc2440v4_features string
  *
  * t = Touchscreen present
- * b = backlight control
- * c = camera [TODO]
+ * b = backlight / LCD power enable (GPG4)
  * 0-9 LCD configuration
  *
  */
@@ -463,10 +472,9 @@ static int __init sbc2440v4_features_setup(char *str)
 
 __setup("sbc2440v4=", sbc2440v4_features_setup);
 
-#define FEATURE_SCREEN (1 << 0)
-#define FEATURE_BACKLIGHT (1 << 1)
-#define FEATURE_TOUCH (1 << 2)
-#define FEATURE_CAMERA (1 << 3)
+#define FEATURE_SCREEN		(1 << 0)
+#define FEATURE_BACKLIGHT	(1 << 1)
+#define FEATURE_TOUCH		(1 << 2)
 
 struct sbc2440v4_features_t {
 	int count;
@@ -513,46 +521,53 @@ static void __init sbc2440v4_parse_features(
 			features->done |= FEATURE_BACKLIGHT;
 			break;
 		case 't':
-			printk(KERN_INFO "SBC2440V4: '%c' ignored, "
-				"touchscreen not compiled in\n", f);
-			break;
-		case 'c':
-			if (features->done & FEATURE_CAMERA)
+			if (!IS_ENABLED(CONFIG_TOUCHSCREEN_S3C2410)) {
 				printk(KERN_INFO "SBC2440V4: '%c' ignored, "
-					"camera already registered\n", f);
-			else
+					"touchscreen not compiled in\n", f);
+			} else if (features->done & FEATURE_TOUCH) {
+				printk(KERN_INFO "SBC2440V4: '%c' ignored, "
+					"touchscreen already set\n", f);
+			} else {
 				features->optional[features->count++] =
-					&s3c_device_camif;
-			features->done |= FEATURE_CAMERA;
+					&s3c_device_ts;
+				features->done |= FEATURE_TOUCH;
+			}
 			break;
 		}
 	}
 }
 
-#define S3C2410_BWSCON_DW4_16	(1<<16)
-#define S3C2410_BWSCON_WS4	(1<<18)
+#define S3C2410_BWSCON_DW4_16	(1 << 16)
+#define S3C2410_BWSCON_WS4	(S3C2410_BWSCON_WS << 16)
 
 /*
  * setup for DM9000.
  */
 static void __init sbc2440v4_dm9000_bus_timing_init(void)
 {
-    u32 bwsc_old, bwsc_new, bank4_val;
+	u32 bwsc_old, bwsc_new, bank4_val;
 
-    bwsc_old = __raw_readl(S3C2410_BWSCON);
+	bwsc_old = readl(S3C2410_BWSCON);
 
-    bwsc_new = (bwsc_old & ~(3 << 16)) |
-               S3C2410_BWSCON_DW4_16 |
-               S3C2410_BWSCON_WS4 |
-               S3C2410_BWSCON_ST4;
+	bwsc_new = (bwsc_old & ~(0xf << 16)) |
+		   S3C2410_BWSCON_DW4_16 |
+		   S3C2410_BWSCON_WS4 |
+		   S3C2410_BWSCON_ST4;
 
-     __raw_writel(bwsc_new, S3C2410_BWSCON);
+	writel(bwsc_new, S3C2410_BWSCON);
 
-    __raw_writel(0x1f7c, S3C2410_BANKCON4);
-    bank4_val = __raw_readl(S3C2410_BANKCON4);
+	bank4_val = (0 << S3C2410_BANKCON_Tacs_SHIFT) |
+		    (3 << S3C2410_BANKCON_Tcos_SHIFT) |
+		    (7 << S3C2410_BANKCON_Tacc_SHIFT) |
+		    (1 << S3C2410_BANKCON_Tcoh_SHIFT) |
+		    (3 << S3C2410_BANKCON_Tcah_SHIFT) |
+		    (3 << S3C2410_BANKCON_Tacp_SHIFT);
 
-    pr_info("sbc2440v4: BWSCON old=0x%08x new=0x%08x BANKCON4=0x%08x\n",
-            bwsc_old, bwsc_new, bank4_val);
+	writel(bank4_val, S3C2410_BANKCON4);
+	bank4_val = readl(S3C2410_BANKCON4);
+
+	pr_info("sbc2440v4: BWSCON old=0x%08x new=0x%08x BANKCON4=0x%08x\n",
+		bwsc_old, bwsc_new, bank4_val);
 }
 
 #if defined(WITH_ADS7846)
@@ -631,33 +646,21 @@ static void __init sbc2440v4_init(void)
 	/* Parse the feature string */
 	sbc2440v4_parse_features(&features, sbc2440v4_features_str);
 
-	/* turn LCD on */
-	s3c_gpio_cfgpin(S3C2410_GPC(0), S3C2410_GPC0_LEND);
-
-	/* Turn the backlight early on */
-	WARN_ON(gpio_request_one(S3C2410_GPG(4), GPIOF_OUT_INIT_HIGH, NULL));
-	gpio_free(S3C2410_GPG(4));
-
-	/* remove pullup on optional PWM backlight -- unused on 3.5 and 7"s */
-	gpio_request_one(S3C2410_GPB(1), GPIOF_IN, NULL);
-	s3c_gpio_setpull(S3C2410_GPB(1), S3C_GPIO_PULL_UP);
-	gpio_free(S3C2410_GPB(1));
+	if (features.lcd_index != -1 || (features.done & FEATURE_BACKLIGHT)) {
+		/* Enable LCD_PWR (GPG4 -> LCD41P pin 30) */
+		WARN_ON(gpio_request_one(S3C2410_GPG(4),
+					 GPIOF_OUT_INIT_HIGH, "lcd-pwr"));
+		gpio_free(S3C2410_GPG(4));
+	}
 
 	if (features.lcd_index != -1) {
-		int li;
-
 		sbc2440v4_fb_info.displays =
 			&sbc2440v4_lcd_cfg[features.lcd_index];
 
-		pr_info("SBC2440V4: LCD");
-		for (li = 0; li < ARRAY_SIZE(sbc2440v4_lcd_cfg); li++) {
-			if (li == features.lcd_index) {
-				pr_cont(" [%d:%dx%d]", li,
-					sbc2440v4_lcd_cfg[li].width,
-					sbc2440v4_lcd_cfg[li].height);
-				break;
-			}
-		}
+		pr_info("SBC2440V4: LCD [%d:%dx%d]\n", features.lcd_index,
+			sbc2440v4_lcd_cfg[features.lcd_index].width,
+			sbc2440v4_lcd_cfg[features.lcd_index].height);
+
 		s3c24xx_fb_set_platdata(&sbc2440v4_fb_info);
 	}
 
@@ -683,6 +686,9 @@ static void __init sbc2440v4_init(void)
 		}
 	}
 #endif
+
+	if (features.done & FEATURE_TOUCH)
+		s3c24xx_ts_set_platdata(&sbc2440v4_ts_cfg);
 
 	s3c24xx_udc_set_platdata(&sbc2440v4_udc_cfg);
 	s3c24xx_mci_set_platdata(&sbc2440v4_mmc_cfg);
