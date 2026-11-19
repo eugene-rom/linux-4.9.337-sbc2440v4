@@ -29,6 +29,7 @@
 #include <mach/fb.h>
 #include <asm/mach-types.h>
 
+#include <mach/hardware.h>
 #include <mach/regs-gpio.h>
 #include <linux/platform_data/leds-s3c24xx.h>
 #include <mach/regs-lcd.h>
@@ -720,6 +721,12 @@ static void __init sbc2440v4_init(void)
 	s3c24xx_mci_set_platdata(&sbc2440v4_mmc_cfg);
 	s3c_nand_set_platdata(&sbc2440v4_nand_info);
 	s3c_i2c0_set_platdata(NULL);
+
+	/* Route DN1/DP1 to 2nd USB Host port (J1/J2 in 1-2) and clear suspend */
+	s3c2410_modify_misccr(S3C2410_MISCCR_USBHOST |
+			      S3C2410_MISCCR_USBSUSPND0 |
+			      S3C2410_MISCCR_USBSUSPND1,
+			      S3C2410_MISCCR_USBHOST);
 
 	platform_add_devices(sbc2440v4_devices, ARRAY_SIZE(sbc2440v4_devices));
 

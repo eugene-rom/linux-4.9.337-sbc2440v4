@@ -9,13 +9,11 @@ My board originally came with a modified Linux kernel 2.6.13, but I was unable t
 Why kernel 4.9? Linux 4.9 is the last LTS kernel that works reliably with Samsung K9F1208 NAND Flash memory.
 In newer kernels, support for older NAND chips is largely broken.
 
-What does not work:
-- Only one USB port works (reason unknown at the moment)
 
 Not used / not tested / not of interest:
 - Camera interface
 - IDE interface
-
+- Buttons
 
 
 Board photo: [sbc2440v4.jpg](_board_info/sbc2440v4.jpg)  
