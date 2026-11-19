@@ -161,6 +161,17 @@ struct net_local {
 /* Example routines you must write ;->. */
 #define tx_done(dev) 1
 
+static int __init cs89x0_parse_media(const char *str)
+{
+	if (!strcmp(str, "rj45"))
+		return FORCE_RJ45;
+	if (!strcmp(str, "aui"))
+		return FORCE_AUI;
+	if (!strcmp(str, "bnc"))
+		return FORCE_BNC;
+	return 0;
+}
+
 /*
  * Permit 'cs89x0_dma=N' in the kernel boot environment
  */
@@ -181,17 +192,16 @@ static int g_cs89x0_media__force;
 
 static int __init media_fn(char *str)
 {
-	if (!strcmp(str, "rj45"))
-		g_cs89x0_media__force = FORCE_RJ45;
-	else if (!strcmp(str, "aui"))
-		g_cs89x0_media__force = FORCE_AUI;
-	else if (!strcmp(str, "bnc"))
-		g_cs89x0_media__force = FORCE_BNC;
+	g_cs89x0_media__force = cs89x0_parse_media(str);
 
 	return 1;
 }
 
 __setup("cs89x0_media=", media_fn);
+#else
+static char media[8];
+module_param_string(media, media, sizeof(media), 0);
+MODULE_PARM_DESC(media, "Set cs89x0 adapter(s) media type(s) (rj45,bnc,aui)");
 #endif
 
 static void readwords(struct net_local *lp, int portno, void *buf, int length)
@@ -1331,6 +1341,8 @@ cs89x0_probe1(struct net_device *dev, void __iomem *ioaddr, int modular)
 		}
 #endif
 		lp->force = g_cs89x0_media__force;
+#else
+		lp->force = cs89x0_parse_media(media);
 #endif
 	}
 
@@ -1498,8 +1510,15 @@ cs89x0_probe1(struct net_device *dev, void __iomem *ioaddr, int modular)
 			lp->adapter_cnf |= A_CNF_MEDIA_10B_2;
 	}
 
+	/* Default to RJ-45 if neither EEPROM nor media option selected one */
+	if (!(lp->adapter_cnf & (A_CNF_10B_T | A_CNF_AUI | A_CNF_10B_2)))
+		lp->adapter_cnf |= A_CNF_10B_T | A_CNF_MEDIA_10B_T;
+
 	cs89_dbg(1, debug, "%s: after force 0x%x, adapter_cnf=0x%x\n",
 		 dev->name, lp->force, lp->adapter_cnf);
+
+	if (!is_valid_ether_addr(dev->dev_addr))
+		eth_hw_addr_random(dev);
 
 	/* FIXME: We don't let you set dc-dc polarity or low RX squelch from the command line: add it here */
 
@@ -1698,7 +1717,6 @@ static struct net_device *dev_cs89x0;
 static int io;
 static int irq;
 static int debug;
-static char media[8];
 static int duplex = -1;
 
 static int use_dma;			/* These generate unused var warnings if ALLOW_DMA = 0 */
@@ -1708,7 +1726,6 @@ static int dmasize = 16;		/* or 64 */
 module_param(io, int, 0);
 module_param(irq, int, 0);
 module_param(debug, int, 0);
-module_param_string(media, media, sizeof(media), 0);
 module_param(duplex, int, 0);
 module_param(dma , int, 0);
 module_param(dmasize , int, 0);
@@ -1720,7 +1737,6 @@ MODULE_PARM_DESC(debug, "cs89x0 debug level (0-6)");
 #else
 MODULE_PARM_DESC(debug, "(ignored)");
 #endif
-MODULE_PARM_DESC(media, "Set cs89x0 adapter(s) media type(s) (rj45,bnc,aui)");
 /* No other value than -1 for duplex seems to be currently interpreted */
 MODULE_PARM_DESC(duplex, "(ignored)");
 #if ALLOW_DMA
@@ -1732,9 +1748,6 @@ MODULE_PARM_DESC(dma , "(ignored)");
 MODULE_PARM_DESC(dmasize , "(ignored)");
 MODULE_PARM_DESC(use_dma , "(ignored)");
 #endif
-
-MODULE_AUTHOR("Mike Cruse, Russwll Nelson <nelson@crynwr.com>, Andrew Morton");
-MODULE_LICENSE("GPL");
 
 /*
  * media=t             - specify media type
@@ -1915,3 +1928,6 @@ static struct platform_driver cs89x0_driver = {
 module_platform_driver_probe(cs89x0_driver, cs89x0_platform_probe);
 
 #endif /* CONFIG_CS89x0_PLATFORM */
+
+MODULE_AUTHOR("Mike Cruse, Russwll Nelson <nelson@crynwr.com>, Andrew Morton");
+MODULE_LICENSE("GPL");

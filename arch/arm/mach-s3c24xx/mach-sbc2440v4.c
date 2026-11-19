@@ -13,6 +13,7 @@
 
 #include <linux/gpio.h>
 #include <linux/io.h>
+#include <linux/irq.h>
 #include <linux/serial_s3c.h>
 #include <linux/dm9000.h>
 #include <linux/mmc/host.h>
@@ -50,6 +51,8 @@
 #include "common.h"
 
 #define MACH_SBC2440V4_DM9K_BASE (S3C2410_CS4 + 0x300)
+/* ADDR24=1 (+0x01000000) enables nIOR/nIOW via U21E/U33; +0x300 = default I/O base */
+#define MACH_SBC2440V4_CS89K_BASE (S3C2410_CS3 + 0x01000300)
 
 static struct map_desc sbc2440v4_iodesc[] __initdata = {
 	/* nothing to declare, move along */
@@ -309,6 +312,22 @@ static struct platform_device sbc2440v4_device_eth = {
 	},
 };
 
+#if IS_ENABLED(CONFIG_CS89x0_PLATFORM)
+/* CS8900A 10M ethernet controller (nGCS3, I/O mode via ADDR24=0, EINT9) */
+
+static struct resource sbc2440v4_cs89k_resource[] = {
+	[0] = DEFINE_RES_MEM(MACH_SBC2440V4_CS89K_BASE, 0x10),
+	[1] = DEFINE_RES_IRQ(IRQ_EINT9),
+};
+
+static struct platform_device sbc2440v4_device_cs8900 = {
+	.name		= "cs89x0",
+	.id		= -1,
+	.num_resources	= ARRAY_SIZE(sbc2440v4_cs89k_resource),
+	.resource	= sbc2440v4_cs89k_resource,
+};
+#endif
+
 /* LEDS */
 
 static struct s3c24xx_led_platdata sbc2440v4_led1_pdata = {
@@ -428,6 +447,9 @@ static struct platform_device *sbc2440v4_devices[] __initdata = {
 	&s3c_device_spi0,
 	&s3c_device_usbgadget,
 	&sbc2440v4_device_eth,
+#if IS_ENABLED(CONFIG_CS89x0_PLATFORM)
+	&sbc2440v4_device_cs8900,
+#endif
 	&sbc2440v4_led1,
 	&sbc2440v4_led2,
 	&sbc2440v4_led3,
@@ -537,37 +559,36 @@ static void __init sbc2440v4_parse_features(
 	}
 }
 
-#define S3C2410_BWSCON_DW4_16	(1 << 16)
-#define S3C2410_BWSCON_WS4	(S3C2410_BWSCON_WS << 16)
+#define S3C2410_BWSCON_DW_16	0x1
 
 /*
- * setup for DM9000.
+ * Configure 16-bit SROM bank timing with WAIT and UB/LB (nBE) enabled.
  */
-static void __init sbc2440v4_dm9000_bus_timing_init(void)
+static void __init sbc2440v4_eth_bank_timing_init(unsigned int bank,
+						  void __iomem *bankcon_reg)
 {
-	u32 bwsc_old, bwsc_new, bank4_val;
+	unsigned int shift = bank * 4;
+	u32 bwsc_old, bwsc_new, bank_val;
 
 	bwsc_old = readl(S3C2410_BWSCON);
 
-	bwsc_new = (bwsc_old & ~(0xf << 16)) |
-		   S3C2410_BWSCON_DW4_16 |
-		   S3C2410_BWSCON_WS4 |
-		   S3C2410_BWSCON_ST4;
+	bwsc_new = (bwsc_old & ~(0xf << shift)) |
+		   ((S3C2410_BWSCON_DW_16 | S3C2410_BWSCON_WS | BIT(3)) << shift);
 
 	writel(bwsc_new, S3C2410_BWSCON);
 
-	bank4_val = (0 << S3C2410_BANKCON_Tacs_SHIFT) |
-		    (3 << S3C2410_BANKCON_Tcos_SHIFT) |
-		    (7 << S3C2410_BANKCON_Tacc_SHIFT) |
-		    (1 << S3C2410_BANKCON_Tcoh_SHIFT) |
-		    (3 << S3C2410_BANKCON_Tcah_SHIFT) |
-		    (3 << S3C2410_BANKCON_Tacp_SHIFT);
+	bank_val = (0 << S3C2410_BANKCON_Tacs_SHIFT) |
+		   (3 << S3C2410_BANKCON_Tcos_SHIFT) |
+		   (7 << S3C2410_BANKCON_Tacc_SHIFT) |
+		   (1 << S3C2410_BANKCON_Tcoh_SHIFT) |
+		   (3 << S3C2410_BANKCON_Tcah_SHIFT) |
+		   (3 << S3C2410_BANKCON_Tacp_SHIFT);
 
-	writel(bank4_val, S3C2410_BANKCON4);
-	bank4_val = readl(S3C2410_BANKCON4);
+	writel(bank_val, bankcon_reg);
+	bank_val = readl(bankcon_reg);
 
-	pr_info("sbc2440v4: BWSCON old=0x%08x new=0x%08x BANKCON4=0x%08x\n",
-		bwsc_old, bwsc_new, bank4_val);
+	pr_info("sbc2440v4: bank%u BWSCON old=0x%08x new=0x%08x BANKCON=0x%08x\n",
+		bank, bwsc_old, bwsc_new, bank_val);
 }
 
 #if defined(WITH_ADS7846)
@@ -639,7 +660,12 @@ static void __init sbc2440v4_init(void)
 {
 	struct sbc2440v4_features_t features = { 0 };
 
-	sbc2440v4_dm9000_bus_timing_init();
+	sbc2440v4_eth_bank_timing_init(4, S3C2410_BANKCON4);
+#if IS_ENABLED(CONFIG_CS89x0_PLATFORM)
+	sbc2440v4_eth_bank_timing_init(3, S3C2410_BANKCON3);
+	/* cs89x0 passes flags=0 to request_irq(), so configure EINT9/GPG1 here */
+	irq_set_irq_type(IRQ_EINT9, IRQ_TYPE_EDGE_RISING);
+#endif
 
 	printk(KERN_INFO "SBC2440V4: Option string sbc2440v4=%s\n", sbc2440v4_features_str);
 
