@@ -10,7 +10,6 @@ Why kernel 4.9? Linux 4.9 is the last LTS kernel that works reliably with Samsun
 In newer kernels, support for older NAND chips is largely broken.
 
 What does not work:
-- 10 Mb Ethernet interface (CS8900A)
 - Only one USB port works (reason unknown at the moment)
 
 Not used / not tested / not of interest:
