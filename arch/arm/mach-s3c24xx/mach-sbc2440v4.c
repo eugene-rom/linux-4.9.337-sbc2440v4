@@ -177,12 +177,21 @@ static struct s3c2410fb_display sbc2440v4_lcd_cfg[] __initdata = {
 				   S3C2410_LCDCON5_INVVCLK |
 				   S3C2410_LCDCON5_HWSWP),
 	},
-	[4] = { /* sbc2440v4 + 8" TFT L80 + touchscreen */
-		_LCD_DECLARE(
-			10,
-			640, 200, 16, 16, 	/* x timing */
-			480, 2, 2, 2,		/* y timing */
-			50),			/* refresh rate */
+	[4] = { /* sbc2440v4 + 8" TFT L80 (TFT640480) + touchscreen */
+		.width		= 640,
+		.xres		= 640,
+		.height		= 480,
+		.yres		= 480,
+		.left_margin	= 200,
+		.right_margin	= 16,
+		.hsync_len	= 16,
+		.upper_margin	= 2,
+		.lower_margin	= 2,
+		.vsync_len	= 2,
+		.pixclock	= 80000,
+		.bpp		= 16,
+		.type		= (S3C2410_LCDCON1_TFT16BPP |
+				   S3C2410_LCDCON1_TFT),
 		.lcdcon5	= (S3C2410_LCDCON5_FRM565 |
 				   S3C2410_LCDCON5_HWSWP),
 	},
