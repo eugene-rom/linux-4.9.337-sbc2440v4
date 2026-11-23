@@ -515,14 +515,14 @@ THUMB(	orr	\reg , \reg , #PSR_T_BIT	)
 	.endm
 
 	.macro	uaccess_save, tmp
-#ifdef CONFIG_CPU_SW_DOMAIN_PAN
+#if defined(CONFIG_CPU_SW_DOMAIN_PAN) || defined(CONFIG_CPU_USE_DOMAINS)
 	mrc	p15, 0, \tmp, c3, c0, 0
 	str	\tmp, [sp, #SVC_DACR]
 #endif
 	.endm
 
 	.macro	uaccess_restore
-#ifdef CONFIG_CPU_SW_DOMAIN_PAN
+#if defined(CONFIG_CPU_SW_DOMAIN_PAN) || defined(CONFIG_CPU_USE_DOMAINS)
 	ldr	r0, [sp, #SVC_DACR]
 	mcr	p15, 0, r0, c3, c0, 0
 #endif
