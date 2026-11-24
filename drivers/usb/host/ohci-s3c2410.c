@@ -61,7 +61,7 @@ static void s3c2410_start_hc(struct platform_device *dev, struct usb_hcd *hcd)
 	dev_dbg(&dev->dev, "s3c2410_start_hc:\n");
 
 	clk_prepare_enable(usb_clk);
-	mdelay(2);			/* let the bus clock stabilise */
+	mdelay(6);			/* cover max UPLL lock time (~5.46 ms at 12 MHz) */
 
 	clk_prepare_enable(clk);
 

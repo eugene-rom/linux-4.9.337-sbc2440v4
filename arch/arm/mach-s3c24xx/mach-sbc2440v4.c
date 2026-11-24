@@ -11,6 +11,7 @@
  * published by the Free Software Foundation.
 */
 
+#include <linux/delay.h>
 #include <linux/gpio.h>
 #include <linux/io.h>
 #include <linux/irq.h>
@@ -30,6 +31,7 @@
 #include <asm/mach-types.h>
 
 #include <mach/hardware.h>
+#include <mach/regs-clock.h>
 #include <mach/regs-gpio.h>
 #include <linux/platform_data/leds-s3c24xx.h>
 #include <mach/regs-lcd.h>
@@ -666,6 +668,25 @@ static struct s3c2410_spi_info sbc2440v4_spi0_cfg = {
 	.gpio_setup	= sbc2440v4_spi0_gpio_setup,
 };
 
+static void __init sbc2440v4_upll_init(void)
+{
+	u32 upllcon = readl(S3C2410_UPLLCON);
+	u32 clkslow = readl(S3C2410_CLKSLOW);
+
+	/*
+	 * Bootloader leaves LOCKTIME=0x00ffffff (U_LTIME=0x00ff, ~21 us),
+	 * too short for UPLL to lock reliably. Set full lock time (~5.46 ms
+	 * at 12 MHz XTI) and force a clean UPLL relock before USB init.
+	 */
+	writel(0xffffffff, S3C2410_LOCKTIME);
+	writel(clkslow | S3C2410_CLKSLOW_UCLK_OFF, S3C2410_CLKSLOW);
+	udelay(50);
+	writel(upllcon, S3C2410_UPLLCON);
+	udelay(10);
+	writel(clkslow & ~S3C2410_CLKSLOW_UCLK_OFF, S3C2410_CLKSLOW);
+	mdelay(6);
+}
+
 static void __init sbc2440v4_init(void)
 {
 	struct sbc2440v4_features_t features = { 0 };
@@ -730,6 +751,8 @@ static void __init sbc2440v4_init(void)
 	s3c24xx_mci_set_platdata(&sbc2440v4_mmc_cfg);
 	s3c_nand_set_platdata(&sbc2440v4_nand_info);
 	s3c_i2c0_set_platdata(NULL);
+
+	sbc2440v4_upll_init();
 
 	/* Route DN1/DP1 to 2nd USB Host port (J1/J2 in 1-2) and clear suspend */
 	s3c2410_modify_misccr(S3C2410_MISCCR_USBHOST |
