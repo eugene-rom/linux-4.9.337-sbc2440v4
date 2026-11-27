@@ -19,7 +19,7 @@
 #include <linux/dm9000.h>
 #include <linux/mmc/host.h>
 #include <linux/spi/s3c24xx.h>
-#if defined(WITH_ADS7846)
+#if IS_ENABLED(CONFIG_TOUCHSCREEN_ADS7846)
 #include <linux/spi/spi.h>
 #include <linux/spi/ads7846.h>
 #endif
@@ -603,7 +603,7 @@ static void __init sbc2440v4_eth_bank_timing_init(unsigned int bank,
 		bank, bwsc_old, bwsc_new, bank_val);
 }
 
-#if defined(WITH_ADS7846)
+#if IS_ENABLED(CONFIG_TOUCHSCREEN_ADS7846)
 /*
  * XPT2046 / ADS7846 SPI touchscreen on SPI0 CS1.
  * Set TS_CS_GPIO to any free output GPIO and TS_IRQ_GPIO to a free EINT pin
@@ -655,7 +655,7 @@ static void sbc2440v4_spi0_gpio_setup(struct s3c2410_spi_info *spi, int enable)
 }
 
 static struct s3c2410_spi_info sbc2440v4_spi0_cfg = {
-#if defined(WITH_ADS7846)
+#if IS_ENABLED(CONFIG_TOUCHSCREEN_ADS7846)
 	.pin_cs		= -1,
 	.num_cs		= ARRAY_SIZE(sbc2440v4_spi0_cs_pins),
 	.set_cs		= sbc2440v4_spi0_set_cs,
@@ -724,7 +724,7 @@ static void __init sbc2440v4_init(void)
 
 	/* setup spi */
 	s3c_device_spi0.dev.platform_data = &sbc2440v4_spi0_cfg;
-#if defined(WITH_ADS7846)
+#if IS_ENABLED(CONFIG_TOUCHSCREEN_ADS7846)
 	{
 		int i, irq;
 
