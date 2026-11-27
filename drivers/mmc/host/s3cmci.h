@@ -49,6 +49,9 @@ struct s3cmci_host {
 	enum s3cmci_waitfor	complete_what;
 
 	int			dma_complete;
+	bool			dodma;
+	bool			dma_mapped;
+	enum dma_data_direction	dma_dir;
 
 	u32			pio_sgptr;
 	u32			pio_bytes;

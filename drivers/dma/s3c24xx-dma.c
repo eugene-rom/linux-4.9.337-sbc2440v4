@@ -522,15 +522,6 @@ static void s3c24xx_dma_start_next_txd(struct s3c24xx_dma_chan *s3cchan)
 	s3c24xx_dma_start_next_sg(s3cchan, txd);
 }
 
-static void s3c24xx_dma_free_txd_list(struct s3c24xx_dma_engine *s3cdma,
-				struct s3c24xx_dma_chan *s3cchan)
-{
-	LIST_HEAD(head);
-
-	vchan_get_all_descriptors(&s3cchan->vc, &head);
-	vchan_dma_desc_free_list(&s3cchan->vc, &head);
-}
-
 /*
  * Try to allocate a physical channel.  When successful, assign it to
  * this virtual channel, and initiate the next descriptor.  The
@@ -711,18 +702,10 @@ static irqreturn_t s3c24xx_dma_irq(int irq, void *data)
 static int s3c24xx_dma_terminate_all(struct dma_chan *chan)
 {
 	struct s3c24xx_dma_chan *s3cchan = to_s3c24xx_dma_chan(chan);
-	struct s3c24xx_dma_engine *s3cdma = s3cchan->host;
 	unsigned long flags;
-	int ret = 0;
+	LIST_HEAD(head);
 
 	spin_lock_irqsave(&s3cchan->vc.lock, flags);
-
-	if (!s3cchan->phy && !s3cchan->at) {
-		dev_err(&s3cdma->pdev->dev, "trying to terminate already stopped channel %d\n",
-			s3cchan->id);
-		ret = -EINVAL;
-		goto unlock;
-	}
 
 	s3cchan->state = S3C24XX_DMA_CHAN_IDLE;
 
@@ -730,18 +713,23 @@ static int s3c24xx_dma_terminate_all(struct dma_chan *chan)
 	if (s3cchan->phy)
 		s3c24xx_dma_phy_free(s3cchan);
 
+	/* Prevent a pending tasklet from invoking a stale cyclic callback */
+	s3cchan->vc.cyclic = NULL;
+
 	/* Dequeue current job */
 	if (s3cchan->at) {
-		s3c24xx_dma_desc_free(&s3cchan->at->vd);
+		list_add_tail(&s3cchan->at->vd.node, &head);
 		s3cchan->at = NULL;
 	}
 
-	/* Dequeue jobs not yet fired as well */
-	s3c24xx_dma_free_txd_list(s3cdma, s3cchan);
-unlock:
+	/* Dequeue jobs not yet fired or awaiting completion callback */
+	vchan_get_all_descriptors(&s3cchan->vc, &head);
+
 	spin_unlock_irqrestore(&s3cchan->vc.lock, flags);
 
-	return ret;
+	vchan_dma_desc_free_list(&s3cchan->vc, &head);
+
+	return 0;
 }
 
 static void s3c24xx_dma_synchronize(struct dma_chan *chan)
@@ -793,12 +781,13 @@ static enum dma_status s3c24xx_dma_tx_status(struct dma_chan *chan,
 		 * the currently active one.
 		 */
 		txd = s3cchan->at;
+		if (txd && s3cchan->phy) {
+			dsg = list_entry(txd->at, struct s3c24xx_sg, node);
+			list_for_each_entry_from(dsg, &txd->dsg_list, node)
+				bytes += dsg->len;
 
-		dsg = list_entry(txd->at, struct s3c24xx_sg, node);
-		list_for_each_entry_from(dsg, &txd->dsg_list, node)
-			bytes += dsg->len;
-
-		bytes += s3c24xx_dma_getbytes_chan(s3cchan);
+			bytes += s3c24xx_dma_getbytes_chan(s3cchan);
+		}
 	}
 	spin_unlock_irqrestore(&s3cchan->vc.lock, flags);
 
@@ -990,6 +979,9 @@ static struct dma_async_tx_descriptor *s3c24xx_dma_prep_slave_sg(
 	u32 hwcfg = 0;
 	int tmp;
 
+	if (!sgl || !sg_len)
+		return NULL;
+
 	dev_dbg(&s3cdma->pdev->dev, "prepare transaction of %d bytes from %s\n",
 			sg_dma_len(sgl), s3cchan->name);
 
@@ -1043,6 +1035,14 @@ static struct dma_async_tx_descriptor *s3c24xx_dma_prep_slave_sg(
 	}
 
 	for_each_sg(sgl, sg, sg_len, tmp) {
+		size_t len = sg_dma_len(sg);
+
+		if (!txd->width || !len || (len % txd->width) != 0 ||
+		    (len / txd->width) > S3C24XX_DCON_TC_MASK) {
+			s3c24xx_dma_free_txd(txd);
+			return NULL;
+		}
+
 		dsg = kzalloc(sizeof(*dsg), GFP_NOWAIT);
 		if (!dsg) {
 			s3c24xx_dma_free_txd(txd);
@@ -1050,7 +1050,7 @@ static struct dma_async_tx_descriptor *s3c24xx_dma_prep_slave_sg(
 		}
 		list_add_tail(&dsg->node, &txd->dsg_list);
 
-		dsg->len = sg_dma_len(sg);
+		dsg->len = len;
 		if (direction == DMA_MEM_TO_DEV) {
 			dsg->src_addr = sg_dma_address(sg);
 			dsg->dst_addr = slave_addr;

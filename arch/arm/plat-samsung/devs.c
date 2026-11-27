@@ -878,6 +878,10 @@ struct platform_device s3c_device_sdi = {
 	.id		= -1,
 	.num_resources	= ARRAY_SIZE(s3c_sdi_resource),
 	.resource	= s3c_sdi_resource,
+	.dev		= {
+		.dma_mask		= &samsung_device_dma_mask,
+		.coherent_dma_mask	= DMA_BIT_MASK(32),
+	},
 };
 
 void __init s3c24xx_mci_set_platdata(struct s3c24xx_mci_pdata *pdata)

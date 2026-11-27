@@ -656,7 +656,7 @@ static irqreturn_t s3cmci_irq(int irq, void *dev_id)
 		goto irq_out;
 	}
 
-	if (!s3cmci_host_usedma(host)) {
+	if (!host->dodma) {
 		if ((host->pio_active == XFER_WRITE) &&
 		    (mci_fsta & S3C2410_SDIFSTA_TFDET)) {
 
@@ -734,7 +734,9 @@ static irqreturn_t s3cmci_irq(int irq, void *dev_id)
 	/* Check for FIFO failure */
 	if (host->is2440) {
 		if (mci_fsta & S3C2440_SDIFSTA_FIFOFAIL) {
-			dbg(host, dbg_err, "FIFO failure\n");
+			dev_err_ratelimited(&host->pdev->dev,
+				"FIFO failure (fsta=0x%08x dsta=0x%08x dcnt=0x%08x dma=%d)\n",
+				mci_fsta, mci_dsta, mci_dcnt, host->dodma);
 			host->mrq->data->error = -EILSEQ;
 			host->status = "error: 2440 fifo failure";
 			goto fail_transfer;
@@ -749,21 +751,27 @@ static irqreturn_t s3cmci_irq(int irq, void *dev_id)
 	}
 
 	if (mci_dsta & S3C2410_SDIDSTA_RXCRCFAIL) {
-		dbg(host, dbg_err, "bad data crc (outgoing)\n");
+		dev_err_ratelimited(&host->pdev->dev,
+			"bad data crc outgoing (dsta=0x%08x fsta=0x%08x dcnt=0x%08x dma=%d)\n",
+			mci_dsta, mci_fsta, mci_dcnt, host->dodma);
 		cmd->data->error = -EILSEQ;
 		host->status = "error: bad data crc (outgoing)";
 		goto fail_transfer;
 	}
 
 	if (mci_dsta & S3C2410_SDIDSTA_CRCFAIL) {
-		dbg(host, dbg_err, "bad data crc (incoming)\n");
+		dev_err_ratelimited(&host->pdev->dev,
+			"bad data crc incoming (dsta=0x%08x fsta=0x%08x dcnt=0x%08x dma=%d)\n",
+			mci_dsta, mci_fsta, mci_dcnt, host->dodma);
 		cmd->data->error = -EILSEQ;
 		host->status = "error: bad data crc (incoming)";
 		goto fail_transfer;
 	}
 
 	if (mci_dsta & S3C2410_SDIDSTA_DATATIMEOUT) {
-		dbg(host, dbg_err, "data timeout\n");
+		dev_err_ratelimited(&host->pdev->dev,
+			"data timeout (dsta=0x%08x fsta=0x%08x dcnt=0x%08x dma=%d)\n",
+			mci_dsta, mci_fsta, mci_dcnt, host->dodma);
 		cmd->data->error = -ETIMEDOUT;
 		host->status = "error: data timeout";
 		goto fail_transfer;
@@ -823,30 +831,66 @@ static irqreturn_t s3cmci_irq_cd(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+static void s3cmci_dma_unmap(struct s3cmci_host *host, struct mmc_data *data)
+{
+	if (!host->dma_mapped)
+		return;
+
+	dma_unmap_sg(mmc_dev(host->mmc), data->sg, data->sg_len,
+		     host->dma_dir);
+	host->dma_mapped = false;
+}
+
+static bool s3cmci_can_dma(struct s3cmci_host *host, struct mmc_data *data)
+{
+	struct scatterlist *sg;
+	int i;
+
+	if (!s3cmci_host_usedma(host) || !host->dma || !data)
+		return false;
+
+	/* S3C24xx SDI DMA operates in 32-bit words */
+	if (data->blksz < 4 || (data->blksz & 3) != 0)
+		return false;
+
+	for_each_sg(data->sg, sg, data->sg_len, i) {
+		if (sg->length < 4 || (sg->length & 3) != 0 ||
+		    (sg->offset & 3) != 0)
+			return false;
+	}
+
+	return true;
+}
+
 static void s3cmci_dma_done_callback(void *arg)
 {
 	struct s3cmci_host *host = arg;
 	unsigned long iflags;
 
-	BUG_ON(!host->mrq);
-	BUG_ON(!host->mrq->data);
-
 	spin_lock_irqsave(&host->complete_lock, iflags);
+
+	if (!host->mrq || !host->mrq->data || !host->dodma ||
+	    host->dma_complete) {
+		dbg(host, dbg_dma, "DMA callback ignored\n");
+		spin_unlock_irqrestore(&host->complete_lock, iflags);
+		return;
+	}
 
 	dbg(host, dbg_dma, "DMA FINISHED\n");
 
 	host->dma_complete = 1;
-	host->complete_what = COMPLETION_FINALIZE;
 
-	tasklet_schedule(&host->pio_tasklet);
+	if (host->complete_what == COMPLETION_FINALIZE)
+		tasklet_schedule(&host->pio_tasklet);
+
 	spin_unlock_irqrestore(&host->complete_lock, iflags);
-
 }
 
 static void finalize_request(struct s3cmci_host *host)
 {
 	struct mmc_request *mrq = host->mrq;
 	struct mmc_command *cmd;
+	unsigned long iflags;
 	int debug_as_failure = 0;
 
 	if (host->complete_what != COMPLETION_FINALIZE)
@@ -858,11 +902,14 @@ static void finalize_request(struct s3cmci_host *host)
 
 	if (cmd->data && (cmd->error == 0) &&
 	    (cmd->data->error == 0)) {
-		if (s3cmci_host_usedma(host) && (!host->dma_complete)) {
+		spin_lock_irqsave(&host->complete_lock, iflags);
+		if (host->dodma && (!host->dma_complete)) {
 			dbg(host, dbg_dma, "DMA Missing (%d)!\n",
 			    host->dma_complete);
+			spin_unlock_irqrestore(&host->complete_lock, iflags);
 			return;
 		}
+		spin_unlock_irqrestore(&host->complete_lock, iflags);
 	}
 
 	/* Read response from controller. */
@@ -890,6 +937,40 @@ static void finalize_request(struct s3cmci_host *host)
 	if (cmd->data && cmd->error)
 		cmd->data->error = cmd->error;
 
+	if (cmd->data) {
+		bool was_dma;
+
+		spin_lock_irqsave(&host->complete_lock, iflags);
+		was_dma = host->dodma;
+		host->dodma = false;
+		spin_unlock_irqrestore(&host->complete_lock, iflags);
+
+		/* If we had an error while transferring data we flush the
+		 * DMA channel and the fifo to clear out any garbage. */
+		if (cmd->data->error != 0) {
+			if (was_dma)
+				dmaengine_terminate_all(host->dma);
+
+			if (host->is2440) {
+				/* Clear failure register and reset fifo. */
+				writel(S3C2440_SDIFSTA_FIFORESET |
+				       S3C2440_SDIFSTA_FIFOFAIL,
+				       host->base + S3C2410_SDIFSTA);
+			} else {
+				u32 mci_con;
+
+				/* reset fifo */
+				mci_con = readl(host->base + S3C2410_SDICON);
+				mci_con |= S3C2410_SDICON_FIFORESET;
+
+				writel(mci_con, host->base + S3C2410_SDICON);
+			}
+		}
+
+		if (was_dma)
+			s3cmci_dma_unmap(host, cmd->data);
+	}
+
 	if (cmd->data && cmd->data->stop && (!host->cmd_is_stop)) {
 		host->cmd_is_stop = 1;
 		s3cmci_send_request(host->mmc);
@@ -906,28 +987,6 @@ static void finalize_request(struct s3cmci_host *host)
 			(mrq->data->blocks * mrq->data->blksz);
 	} else {
 		mrq->data->bytes_xfered = 0;
-	}
-
-	/* If we had an error while transferring data we flush the
-	 * DMA channel and the fifo to clear out any garbage. */
-	if (mrq->data->error != 0) {
-		if (s3cmci_host_usedma(host))
-			dmaengine_terminate_all(host->dma);
-
-		if (host->is2440) {
-			/* Clear failure register and reset fifo. */
-			writel(S3C2440_SDIFSTA_FIFORESET |
-			       S3C2440_SDIFSTA_FIFOFAIL,
-			       host->base + S3C2410_SDIFSTA);
-		} else {
-			u32 mci_con;
-
-			/* reset fifo */
-			mci_con = readl(host->base + S3C2410_SDICON);
-			mci_con |= S3C2410_SDICON_FIFORESET;
-
-			writel(mci_con, host->base + S3C2410_SDICON);
-		}
 	}
 
 request_done:
@@ -1009,7 +1068,7 @@ static int s3cmci_setup_data(struct s3cmci_host *host, struct mmc_data *data)
 
 	dcon  = data->blocks & S3C2410_SDIDCON_BLKNUM_MASK;
 
-	if (s3cmci_host_usedma(host))
+	if (host->dodma)
 		dcon |= S3C2410_SDIDCON_DMAEN;
 
 	if (host->bus_width == MMC_BUS_WIDTH_4)
@@ -1086,6 +1145,7 @@ static int s3cmci_prepare_pio(struct s3cmci_host *host, struct mmc_data *data)
 static int s3cmci_prepare_dma(struct s3cmci_host *host, struct mmc_data *data)
 {
 	int rw = data->flags & MMC_DATA_WRITE;
+	int dma_len, ret;
 	struct dma_async_tx_descriptor *desc;
 	struct dma_slave_config conf = {
 		.src_addr = host->mem->start + host->sdidata,
@@ -1099,31 +1159,43 @@ static int s3cmci_prepare_dma(struct s3cmci_host *host, struct mmc_data *data)
 	/* Restore prescaler value */
 	writel(host->prescaler, host->base + S3C2410_SDIPRE);
 
-	if (!rw)
+	if (!rw) {
 		conf.direction = DMA_DEV_TO_MEM;
-	else
+		host->dma_dir = DMA_FROM_DEVICE;
+	} else {
 		conf.direction = DMA_MEM_TO_DEV;
+		host->dma_dir = DMA_TO_DEVICE;
+	}
 
-	dma_map_sg(mmc_dev(host->mmc), data->sg, data->sg_len,
-			     rw ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
+	dma_len = dma_map_sg(mmc_dev(host->mmc), data->sg, data->sg_len,
+			     host->dma_dir);
+	if (dma_len <= 0)
+		return -ENOMEM;
 
-	dmaengine_slave_config(host->dma, &conf);
-	desc = dmaengine_prep_slave_sg(host->dma, data->sg, data->sg_len,
+	host->dma_mapped = true;
+
+	ret = dmaengine_slave_config(host->dma, &conf);
+	if (ret)
+		goto unmap_exit;
+
+	desc = dmaengine_prep_slave_sg(host->dma, data->sg, dma_len,
 		conf.direction,
 		DMA_CTRL_ACK | DMA_PREP_INTERRUPT);
-	if (!desc)
+	if (!desc) {
+		ret = -ENOMEM;
 		goto unmap_exit;
+	}
+
+	host->dma_complete = 0;
 	desc->callback = s3cmci_dma_done_callback;
 	desc->callback_param = host;
 	dmaengine_submit(desc);
-	dma_async_issue_pending(host->dma);
 
 	return 0;
 
 unmap_exit:
-	dma_unmap_sg(mmc_dev(host->mmc), data->sg, data->sg_len,
-			     rw ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
-	return -ENOMEM;
+	s3cmci_dma_unmap(host, data);
+	return ret;
 }
 
 static void s3cmci_send_request(struct mmc_host *mmc)
@@ -1133,6 +1205,9 @@ static void s3cmci_send_request(struct mmc_host *mmc)
 	struct mmc_command *cmd = host->cmd_is_stop ? mrq->stop : mrq->cmd;
 
 	host->ccnt++;
+	host->dodma = false;
+	host->dma_complete = 0;
+	host->complete_what = COMPLETION_NONE;
 	prepare_dbgmsg(host, cmd, host->cmd_is_stop);
 
 	/* Clear command, data and fifo status registers
@@ -1143,12 +1218,28 @@ static void s3cmci_send_request(struct mmc_host *mmc)
 	writel(0xFFFFFFFF, host->base + S3C2410_SDIFSTA);
 
 	if (cmd->data) {
-		int res = s3cmci_setup_data(host, cmd->data);
+		int res;
 
 		host->dcnt++;
 
+		if (s3cmci_can_dma(host, cmd->data)) {
+			res = s3cmci_prepare_dma(host, cmd->data);
+			if (res == 0)
+				host->dodma = true;
+			else
+				dbg(host, dbg_dma,
+				    "dma prepare error %d, falling back to pio\n",
+				    res);
+		}
+
+		res = s3cmci_setup_data(host, cmd->data);
 		if (res) {
 			dbg(host, dbg_err, "setup data error %d\n", res);
+			if (host->dodma) {
+				host->dodma = false;
+				dmaengine_terminate_all(host->dma);
+				s3cmci_dma_unmap(host, cmd->data);
+			}
 			cmd->error = res;
 			cmd->data->error = res;
 
@@ -1156,18 +1247,18 @@ static void s3cmci_send_request(struct mmc_host *mmc)
 			return;
 		}
 
-		if (s3cmci_host_usedma(host))
-			res = s3cmci_prepare_dma(host, cmd->data);
-		else
+		if (host->dodma) {
+			dma_async_issue_pending(host->dma);
+		} else {
 			res = s3cmci_prepare_pio(host, cmd->data);
+			if (res) {
+				dbg(host, dbg_err, "data prepare error %d\n", res);
+				cmd->error = res;
+				cmd->data->error = res;
 
-		if (res) {
-			dbg(host, dbg_err, "data prepare error %d\n", res);
-			cmd->error = res;
-			cmd->data->error = res;
-
-			mmc_request_done(mmc, mrq);
-			return;
+				mmc_request_done(mmc, mrq);
+				return;
+			}
 		}
 	}
 
