@@ -59,6 +59,7 @@ struct snd_usb_audio {
 
 	int setup;			/* from the 'device_setup' module param */
 	bool autoclock;			/* from the 'autoclock' module param */
+	bool keep_alive;		/* from the 'keep_alive' module param */
 
 	struct usb_host_interface *ctrl_intf;	/* the audio control interface */
 };

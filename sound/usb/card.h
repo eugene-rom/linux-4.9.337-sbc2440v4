@@ -157,6 +157,12 @@ struct snd_usb_substream {
 	} dsd_dop;
 
 	bool trigger_tstamp_pending_update; /* trigger timestamp being updated from initial estimate */
+
+	bool keep_alive_active;
+	struct audioformat *keep_alive_fmt;
+	snd_pcm_format_t keep_alive_pcm_format;
+	unsigned int keep_alive_channels;
+	unsigned int keep_alive_rate;
 };
 
 struct snd_usb_stream {

@@ -82,6 +82,7 @@ static int pid[SNDRV_CARDS] = { [0 ... (SNDRV_CARDS-1)] = -1 };
 static int device_setup[SNDRV_CARDS]; /* device parameter for this card */
 static bool ignore_ctl_error;
 static bool autoclock = true;
+static bool keep_alive;
 static char *quirk_alias[SNDRV_CARDS];
 
 module_param_array(index, int, NULL, 0444);
@@ -101,6 +102,8 @@ MODULE_PARM_DESC(ignore_ctl_error,
 		 "Ignore errors from USB controller for mixer interfaces.");
 module_param(autoclock, bool, 0444);
 MODULE_PARM_DESC(autoclock, "Enable auto-clock selection for UAC2 devices (default: yes).");
+module_param(keep_alive, bool, 0444);
+MODULE_PARM_DESC(keep_alive, "Keep playback endpoint streaming silence when idle (default: no).");
 module_param_array(quirk_alias, charp, NULL, 0444);
 MODULE_PARM_DESC(quirk_alias, "Quirk aliases, e.g. 0123abcd:5678beef.");
 
@@ -127,6 +130,8 @@ static void snd_usb_stream_disconnect(struct snd_usb_stream *as)
 		if (!subs->num_formats)
 			continue;
 		subs->interface = -1;
+		subs->keep_alive_active = false;
+		subs->keep_alive_fmt = NULL;
 		subs->data_endpoint = NULL;
 		subs->sync_endpoint = NULL;
 	}
@@ -397,6 +402,7 @@ static int snd_usb_audio_create(struct usb_interface *intf,
 	chip->card = card;
 	chip->setup = device_setup[idx];
 	chip->autoclock = autoclock;
+	chip->keep_alive = keep_alive;
 	atomic_set(&chip->active, 1); /* avoid autopm during probing */
 	atomic_set(&chip->usage_count, 0);
 	atomic_set(&chip->shutdown, 0);
@@ -771,6 +777,8 @@ static int usb_audio_suspend(struct usb_interface *intf, pm_message_t message)
 	if (!chip->num_suspended_intf++) {
 		list_for_each_entry(as, &chip->pcm_list, list) {
 			snd_pcm_suspend_all(as->pcm);
+			snd_usb_pcm_stop_keep_alive(&as->substream[0], true);
+			snd_usb_pcm_stop_keep_alive(&as->substream[1], true);
 			as->substream[0].need_setup_ep =
 				as->substream[1].need_setup_ep = true;
 		}

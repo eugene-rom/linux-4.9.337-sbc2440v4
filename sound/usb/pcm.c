@@ -726,6 +726,66 @@ static int configure_endpoint(struct snd_usb_substream *subs)
  * if sg buffer is supported on the later version of alsa, we'll follow
  * that.
  */
+static bool snd_usb_use_keep_alive(struct snd_usb_substream *subs)
+{
+	return subs->stream->chip->keep_alive &&
+	       subs->direction == SNDRV_PCM_STREAM_PLAYBACK &&
+	       !subs->sync_endpoint;
+}
+
+static bool snd_usb_keep_alive_matches(struct snd_usb_substream *subs,
+				       struct audioformat *fmt)
+{
+	struct snd_usb_endpoint *ep = subs->data_endpoint;
+	unsigned int min_period_bytes;
+
+	if (!subs->keep_alive_active || !ep || !ep->nurbs ||
+	    !ep->urb[0].packets)
+		return false;
+	if (fmt != subs->keep_alive_fmt ||
+	    subs->pcm_format != subs->keep_alive_pcm_format ||
+	    subs->channels != subs->keep_alive_channels ||
+	    subs->cur_rate != subs->keep_alive_rate)
+		return false;
+	min_period_bytes = ep->urb[0].packets * ep->curpacksize;
+	if (subs->period_bytes < min_period_bytes)
+		return false;
+	return true;
+}
+
+void snd_usb_pcm_stop_keep_alive(struct snd_usb_substream *subs,
+				 bool reset_iface)
+{
+	unsigned long flags;
+
+	if (!subs->keep_alive_active)
+		return;
+
+	subs->keep_alive_active = false;
+	subs->keep_alive_fmt = NULL;
+	subs->keep_alive_rate = 0;
+
+	if (subs->data_endpoint) {
+		spin_lock_irqsave(&subs->lock, flags);
+		subs->data_endpoint->prepare_data_urb = NULL;
+		subs->data_endpoint->retire_data_urb = NULL;
+		subs->running = 0;
+		spin_unlock_irqrestore(&subs->lock, flags);
+	}
+
+	stop_endpoints(subs, true);
+	snd_usb_endpoint_deactivate(subs->sync_endpoint);
+	snd_usb_endpoint_deactivate(subs->data_endpoint);
+
+	if (reset_iface && subs->interface >= 0) {
+		usb_set_interface(subs->dev, subs->interface, 0);
+		subs->interface = -1;
+		subs->altset_idx = 0;
+	}
+	subs->cur_audiofmt = NULL;
+	snd_usb_autosuspend(subs->stream->chip);
+}
+
 static int snd_usb_hw_params(struct snd_pcm_substream *substream,
 			     struct snd_pcm_hw_params *hw_params)
 {
@@ -753,9 +813,19 @@ static int snd_usb_hw_params(struct snd_pcm_substream *substream,
 		return -EINVAL;
 	}
 
+	if (snd_usb_keep_alive_matches(subs, fmt)) {
+		subs->cur_audiofmt = fmt;
+		subs->interface = fmt->iface;
+		subs->altset_idx = fmt->altset_idx;
+		subs->need_setup_ep = false;
+		return 0;
+	}
+
 	ret = snd_usb_lock_shutdown(subs->stream->chip);
 	if (ret < 0)
 		return ret;
+	if (subs->keep_alive_active)
+		snd_usb_pcm_stop_keep_alive(subs, true);
 	ret = set_format(subs, fmt);
 	snd_usb_unlock_shutdown(subs->stream->chip);
 	if (ret < 0)
@@ -776,6 +846,18 @@ static int snd_usb_hw_params(struct snd_pcm_substream *substream,
 static int snd_usb_hw_free(struct snd_pcm_substream *substream)
 {
 	struct snd_usb_substream *subs = substream->runtime->private_data;
+	unsigned long flags;
+
+	if (subs->keep_alive_active) {
+		spin_lock_irqsave(&subs->lock, flags);
+		if (subs->data_endpoint) {
+			subs->data_endpoint->prepare_data_urb = NULL;
+			subs->data_endpoint->retire_data_urb = NULL;
+		}
+		subs->running = 0;
+		spin_unlock_irqrestore(&subs->lock, flags);
+		return snd_pcm_lib_free_vmalloc_buffer(substream);
+	}
 
 	subs->cur_audiofmt = NULL;
 	subs->cur_rate = 0;
@@ -815,6 +897,31 @@ static int snd_usb_pcm_prepare(struct snd_pcm_substream *substream)
 		goto unlock;
 	}
 
+	if (subs->keep_alive_active && !subs->need_setup_ep) {
+		struct snd_usb_endpoint *ep = subs->data_endpoint;
+		unsigned int minsize, max_packs_per_period, urbs_per_period;
+
+		minsize = max(1u, (ep->freqn >> (16 - ep->datainterval)) *
+				  ep->stride);
+		max_packs_per_period = DIV_ROUND_UP(subs->period_bytes, minsize);
+		urbs_per_period = DIV_ROUND_UP(max_packs_per_period,
+					       ep->urb[0].packets);
+		ep->max_urb_frames = DIV_ROUND_UP(subs->period_frames,
+						  max(1u, urbs_per_period));
+		ep->maxframesize = bytes_to_frames(runtime, ep->maxpacksize);
+		ep->curframesize = bytes_to_frames(runtime, ep->curpacksize);
+
+		subs->hwptr_done = 0;
+		subs->transfer_done = 0;
+		subs->frame_limit = 0;
+		subs->last_delay = 0;
+		subs->last_frame_number = 0;
+		runtime->delay = 0;
+
+		ret = start_endpoints(subs);
+		goto unlock;
+	}
+
 	snd_usb_endpoint_sync_pending_stop(subs->sync_endpoint);
 	snd_usb_endpoint_sync_pending_stop(subs->data_endpoint);
 
@@ -848,14 +955,30 @@ static int snd_usb_pcm_prepare(struct snd_pcm_substream *substream)
 	/* reset the pointer */
 	subs->hwptr_done = 0;
 	subs->transfer_done = 0;
+	subs->frame_limit = 0;
 	subs->last_delay = 0;
 	subs->last_frame_number = 0;
 	runtime->delay = 0;
 
 	/* for playback, submit the URBs now; otherwise, the first hwptr_done
 	 * updates for all URBs would happen at the same time when starting */
-	if (subs->direction == SNDRV_PCM_STREAM_PLAYBACK)
+	if (subs->direction == SNDRV_PCM_STREAM_PLAYBACK) {
 		ret = start_endpoints(subs);
+		if (ret == 0 && snd_usb_use_keep_alive(subs) &&
+		    !subs->keep_alive_active) {
+			if (snd_usb_autoresume(subs->stream->chip) == 0) {
+				subs->keep_alive_active = true;
+				subs->keep_alive_fmt = subs->cur_audiofmt;
+				subs->keep_alive_pcm_format = subs->pcm_format;
+				subs->keep_alive_channels = subs->channels;
+				subs->keep_alive_rate = subs->cur_rate;
+				dev_dbg(&subs->dev->dev,
+					"USB audio keep-alive active (%u Hz, fmt=%d, ch=%u)\n",
+					subs->cur_rate, subs->pcm_format,
+					subs->channels);
+			}
+		}
+	}
 
  unlock:
 	snd_usb_unlock_shutdown(subs->stream->chip);
@@ -1238,8 +1361,10 @@ static int snd_usb_pcm_open(struct snd_pcm_substream *substream, int direction)
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct snd_usb_substream *subs = &as->substream[direction];
 
-	subs->interface = -1;
-	subs->altset_idx = 0;
+	if (!subs->keep_alive_active) {
+		subs->interface = -1;
+		subs->altset_idx = 0;
+	}
 	runtime->hw = snd_usb_hardware;
 	runtime->private_data = subs;
 	subs->pcm_substream = substream;
@@ -1257,6 +1382,20 @@ static int snd_usb_pcm_close(struct snd_pcm_substream *substream, int direction)
 {
 	struct snd_usb_stream *as = snd_pcm_substream_chip(substream);
 	struct snd_usb_substream *subs = &as->substream[direction];
+	unsigned long flags;
+
+	if (subs->keep_alive_active) {
+		spin_lock_irqsave(&subs->lock, flags);
+		if (subs->data_endpoint) {
+			subs->data_endpoint->prepare_data_urb = NULL;
+			subs->data_endpoint->retire_data_urb = NULL;
+		}
+		subs->running = 0;
+		subs->pcm_substream = NULL;
+		spin_unlock_irqrestore(&subs->lock, flags);
+		snd_usb_autosuspend(subs->stream->chip);
+		return 0;
+	}
 
 	stop_endpoints(subs, true);
 
@@ -1655,6 +1794,12 @@ static int snd_usb_substream_playback_trigger(struct snd_pcm_substream *substrea
 		subs->running = 1;
 		return 0;
 	case SNDRV_PCM_TRIGGER_STOP:
+		if (subs->keep_alive_active) {
+			subs->data_endpoint->prepare_data_urb = NULL;
+			subs->data_endpoint->retire_data_urb = NULL;
+			subs->running = 0;
+			return 0;
+		}
 		stop_endpoints(subs, false);
 		subs->running = 0;
 		return 0;
