@@ -12,10 +12,13 @@
 #include <linux/spinlock.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
+#include <linux/dmaengine.h>
+#include <linux/dma-mapping.h>
 #include <linux/errno.h>
 #include <linux/err.h>
 #include <linux/clk.h>
 #include <linux/platform_device.h>
+#include <linux/platform_data/dma-s3c24xx.h>
 #include <linux/gpio.h>
 #include <linux/io.h>
 #include <linux/slab.h>
@@ -25,11 +28,20 @@
 #include <linux/spi/s3c24xx.h>
 #include <linux/module.h>
 
+#include <mach/dma.h>
 #include <plat/regs-spi.h>
 
 #include <asm/fiq.h>
 
 #include "spi-s3c24xx-fiq.h"
+
+#define S3C2410_SPCON_SMOD_MASK	(3 << 5)
+#define S3C24XX_SPI_DMA_MIN_LEN	64
+#define S3C24XX_SPI_DMA_MAX_LEN	0xfffff
+
+static bool use_dma = true;
+module_param(use_dma, bool, 0644);
+MODULE_PARM_DESC(use_dma, "Use DMA for large TX-only transfers (default: true)");
 
 /**
  * s3c24xx_spi_devstate - per device data
@@ -58,9 +70,12 @@ struct s3c24xx_spi {
 	struct completion	 done;
 
 	void __iomem		*regs;
+	phys_addr_t		 phys_base;
 	int			 irq;
 	int			 len;
 	int			 count;
+
+	struct dma_chan		*dma_tx;
 
 	struct fiq_handler	 fiq_handler;
 	enum spi_fiq_mode	 fiq_mode;
@@ -404,9 +419,132 @@ static inline bool s3c24xx_spi_usingfiq(struct s3c24xx_spi *s) { return false; }
 
 #endif /* CONFIG_SPI_S3C24XX_FIQ */
 
+static void s3c24xx_spi_dma_callback(void *arg)
+{
+	struct s3c24xx_spi *hw = arg;
+
+	complete(&hw->done);
+}
+
+static bool s3c24xx_spi_can_tx_dma(struct s3c24xx_spi *hw,
+				   struct spi_transfer *t)
+{
+	if (!use_dma || !hw->dma_tx)
+		return false;
+
+	if (!t->tx_buf || t->rx_buf)
+		return false;
+
+	if (t->len < S3C24XX_SPI_DMA_MIN_LEN ||
+	    t->len > S3C24XX_SPI_DMA_MAX_LEN)
+		return false;
+
+	if (!virt_addr_valid(t->tx_buf) ||
+	    object_is_on_stack((void *)t->tx_buf))
+		return false;
+
+	return true;
+}
+
+static int s3c24xx_spi_tx_dma(struct spi_device *spi, struct spi_transfer *t)
+{
+	struct s3c24xx_spi *hw = to_hw(spi);
+	struct s3c24xx_spi_devstate *cs = spi->controller_state;
+	struct dma_slave_config conf = {
+		.direction = DMA_MEM_TO_DEV,
+		.dst_addr = hw->phys_base + S3C2410_SPTDAT,
+		.dst_addr_width = DMA_SLAVE_BUSWIDTH_1_BYTE,
+	};
+	struct dma_async_tx_descriptor *desc;
+	dma_addr_t dma_addr;
+	unsigned long timeout_ms, rem;
+	u8 spcon_base, spcon_poll, spcon_dma, spcon_int;
+	int ret, i;
+
+	dma_addr = dma_map_single(hw->dev, (void *)t->tx_buf, t->len,
+				  DMA_TO_DEVICE);
+	if (dma_mapping_error(hw->dev, dma_addr))
+		return -ENOMEM;
+
+	ret = dmaengine_slave_config(hw->dma_tx, &conf);
+	if (ret)
+		goto err_unmap;
+
+	desc = dmaengine_prep_slave_single(hw->dma_tx, dma_addr, t->len,
+					   DMA_MEM_TO_DEV,
+					   DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
+	if (!desc) {
+		ret = -ENOMEM;
+		goto err_unmap;
+	}
+
+	reinit_completion(&hw->done);
+	desc->callback = s3c24xx_spi_dma_callback;
+	desc->callback_param = hw;
+	dmaengine_submit(desc);
+
+	spcon_base = (cs->spcon & ~S3C2410_SPCON_SMOD_MASK) |
+		     S3C2410_SPCON_ENSCK;
+	spcon_poll = spcon_base | S3C2410_SPCON_SMOD_POLL;
+	spcon_dma  = spcon_base | S3C2410_SPCON_SMOD_DMA;
+	spcon_int  = spcon_base | S3C2410_SPCON_SMOD_INT;
+
+	/* Ensure SPI is idle in polling mode before arming DMA */
+	writeb(spcon_poll, hw->regs + S3C2410_SPCON);
+	for (i = 0; i < 1000; i++) {
+		if (readb(hw->regs + S3C2410_SPSTA) & S3C2410_SPSTA_READY)
+			break;
+		udelay(1);
+	}
+	readb(hw->regs + S3C2410_SPRDAT);
+
+	/* Arm DMA channel first, then switch SPI to DMA request mode */
+	dma_async_issue_pending(hw->dma_tx);
+	writeb(spcon_dma, hw->regs + S3C2410_SPCON);
+
+	timeout_ms = (8000UL * t->len) / max_t(unsigned int, cs->hz, 100000U) + 500;
+	rem = wait_for_completion_timeout(&hw->done, msecs_to_jiffies(timeout_ms));
+
+	/* Switch to polling mode so completion of last byte does not raise SPI IRQ */
+	writeb(spcon_poll, hw->regs + S3C2410_SPCON);
+
+	if (rem == 0) {
+		dev_err_ratelimited(hw->dev,
+			"TX DMA timeout (len=%u, spsta=0x%02x)\n",
+			t->len, readb(hw->regs + S3C2410_SPSTA));
+		dmaengine_terminate_all(hw->dma_tx);
+		readb(hw->regs + S3C2410_SPRDAT);
+		writeb(spcon_int, hw->regs + S3C2410_SPCON);
+		dma_unmap_single(hw->dev, dma_addr, t->len, DMA_TO_DEVICE);
+		return -ETIMEDOUT;
+	}
+
+	/* Wait for the final byte written by DMA to finish shifting out */
+	for (i = 0; i < 1000; i++) {
+		if (readb(hw->regs + S3C2410_SPSTA) & S3C2410_SPSTA_READY)
+			break;
+		udelay(1);
+	}
+	readb(hw->regs + S3C2410_SPRDAT);
+	writeb(spcon_int, hw->regs + S3C2410_SPCON);
+
+	dma_unmap_single(hw->dev, dma_addr, t->len, DMA_TO_DEVICE);
+	return t->len;
+
+err_unmap:
+	dma_unmap_single(hw->dev, dma_addr, t->len, DMA_TO_DEVICE);
+	return ret;
+}
+
 static int s3c24xx_spi_txrx(struct spi_device *spi, struct spi_transfer *t)
 {
 	struct s3c24xx_spi *hw = to_hw(spi);
+
+	if (s3c24xx_spi_can_tx_dma(hw, t)) {
+		int ret = s3c24xx_spi_tx_dma(spi, t);
+		if (ret >= 0 || ret == -ETIMEDOUT)
+			return ret;
+	}
 
 	hw->tx = t->tx_buf;
 	hw->rx = t->rx_buf;
@@ -552,6 +690,7 @@ static int s3c24xx_spi_probe(struct platform_device *pdev)
 		err = PTR_ERR(hw->regs);
 		goto err_no_pdata;
 	}
+	hw->phys_base = res->start;
 
 	hw->irq = platform_get_irq(pdev, 0);
 	if (hw->irq < 0) {
@@ -603,15 +742,37 @@ static int s3c24xx_spi_probe(struct platform_device *pdev)
 
 	s3c24xx_spi_initialsetup(hw);
 
+	if (IS_ENABLED(CONFIG_S3C24XX_DMAC) &&
+	    (pdata->bus_num == 0 || pdata->bus_num == 1)) {
+		dma_cap_mask_t mask;
+		enum dma_ch dmach = pdata->bus_num == 0 ?
+				    DMACH_SPI0 : DMACH_SPI1;
+
+		dma_cap_zero(mask);
+		dma_cap_set(DMA_SLAVE, mask);
+
+		hw->dma_tx = dma_request_slave_channel_compat(mask,
+			s3c24xx_dma_filter, (void *)(uintptr_t)dmach,
+			&pdev->dev, "tx");
+		if (hw->dma_tx)
+			dev_info(hw->dev, "TX DMA enabled\n");
+		else
+			dev_warn(hw->dev, "TX DMA unavailable, using IRQ/FIQ\n");
+	}
+
 	/* register our spi controller */
 
 	err = spi_bitbang_start(&hw->bitbang);
 	if (err) {
 		dev_err(&pdev->dev, "Failed to register SPI master\n");
-		goto err_register;
+		goto err_dma;
 	}
 
 	return 0;
+
+ err_dma:
+	if (hw->dma_tx)
+		dma_release_channel(hw->dma_tx);
 
  err_register:
 	clk_disable(hw->clk);
@@ -626,6 +787,8 @@ static int s3c24xx_spi_remove(struct platform_device *dev)
 	struct s3c24xx_spi *hw = platform_get_drvdata(dev);
 
 	spi_bitbang_stop(&hw->bitbang);
+	if (hw->dma_tx)
+		dma_release_channel(hw->dma_tx);
 	clk_disable(hw->clk);
 	spi_master_put(hw->master);
 	return 0;
